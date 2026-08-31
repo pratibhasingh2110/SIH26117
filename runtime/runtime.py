@@ -1,5 +1,6 @@
 from runtime.actions import ToolCall, FinalAnswer
 from runtime.agent import Agent
+from runtime.config import RuntimeConfig
 from runtime.context import ContextBuilder
 from runtime.executor import ToolExecutor
 from runtime.messages import Message
@@ -13,16 +14,23 @@ class AgentRuntime:
 
     def __init__(
         self,
+        config: RuntimeConfig | None = None,
+        *,
         max_steps: int = 10,
-        recorder: EventRecorder | None = None
+        recorder: EventRecorder | None = None,
     ):
-        self.max_steps = max_steps
+        if config is not None:
+            self.config = config
+        else:
+            self.config = RuntimeConfig(max_steps=max_steps)
+
         self.recorder = recorder or EventRecorder()
 
         self.context_builder = ContextBuilder()
         self.parser = ResponseParser()
 
         self._tool_call_counter = 0
+        self._tool_call_count = 0
 
     def _next_tool_call_id(self):
         self._tool_call_counter += 1
@@ -65,7 +73,7 @@ class AgentRuntime:
                 step=state.step
             )
 
-            if state.step > self.max_steps:
+            if state.step > self.config.max_steps:
 
                 state.status = "max_steps_exceeded"
                 state.result = (
@@ -157,6 +165,25 @@ class AgentRuntime:
 
                 for tool_call in action:
 
+                    if (
+                        self.config.max_tool_calls is not None
+                        and self._tool_call_count >= self.config.max_tool_calls
+                    ):
+
+                        state.status = "max_tool_calls_exceeded"
+                        state.result = (
+                            "Agent exceeded maximum tool calls."
+                        )
+
+                        self.recorder.record(
+                            "AgentStopped",
+                            reason="max_tool_calls_exceeded",
+                            tool_calls=self._tool_call_count,
+                            steps=state.step
+                        )
+
+                        return state
+
                     state.actions.append({
                         "tool": tool_call.tool_name,
                         "arguments": tool_call.arguments,
@@ -175,6 +202,8 @@ class AgentRuntime:
                         result = executor.execute(tool_call)
 
                     except ToolExecutionError as error:
+
+                        self._tool_call_count += 1
 
                         state.observations.append({
                             "tool": tool_call.tool_name,
@@ -197,6 +226,8 @@ class AgentRuntime:
                         ))
 
                         continue
+
+                    self._tool_call_count += 1
 
                     state.observations.append({
                         "tool": tool_call.tool_name,
