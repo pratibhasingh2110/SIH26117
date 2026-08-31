@@ -2,6 +2,38 @@ import streamlit as st
 from datetime import datetime
 
 # ============================================================
+# AGENT RUNTIME INTEGRATION
+# ============================================================
+# The real agent runtime (router -> agent -> runtime -> Ollama -> tools)
+# is wired into the existing UI below. Loading is best-effort so the
+# rest of the frontend keeps working even if the runtime is unavailable.
+try:
+    from demo import run_task, DemoError
+
+    _RUNTIME_AVAILABLE = True
+except Exception:  # pragma: no cover - runtime import failure
+    _RUNTIME_AVAILABLE = False
+
+
+def render_execution_trace(events):
+    """Render the serialized event trace as an expandable list."""
+    for event in events:
+        etype = event.get("type", "")
+        detail = " · ".join(
+            f"{k}={v}"
+            for k, v in event.items()
+            if k not in ("type", "execution_id") and v not in (None, "")
+        )
+        st.markdown(
+            f'<div class="card" style="padding:8px 12px;margin-bottom:5px">'
+            f'<span class="purple">▸</span> <b>{etype}</b>'
+            f'<span class="muted" style="float:right">{detail}</span>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# ============================================================
 # PAGE CONFIG
 # ============================================================
 
@@ -720,6 +752,72 @@ elif selected_page == "Agent Orchestrator":
                 """,
                 unsafe_allow_html=True,
             )
+
+    section("AGENT RUNTIME")
+
+    if not _RUNTIME_AVAILABLE:
+        st.warning(
+            "Agent runtime is not available (demo package failed to load). "
+            "The rest of the workbench remains fully functional."
+        )
+    else:
+        task_input = st.text_area(
+            "Agent task",
+            value="Use the calculator to calculate 25 + 17.",
+            height=90,
+            label_visibility="collapsed",
+            key="runtime_task",
+        )
+
+        run_clicked = st.button(
+            "▶  Run Agent Runtime",
+            use_container_width=True,
+            key="runtime_run",
+        )
+
+        if run_clicked:
+            if not task_input.strip():
+                st.warning("Please enter a task.")
+            else:
+                with st.spinner("Routing agent · executing …"):
+                    try:
+                        result = run_task(task_input.strip())
+                    except DemoError as error:
+                        st.error(str(error))
+                        result = None
+
+                if result:
+                    st.markdown('<div class="card">', unsafe_allow_html=True)
+                    exec_cols = st.columns([1, 1, 1, 1])
+                    exec_cols[0].markdown(
+                        f'<div class="eyebrow">SELECTED AGENT</div><b>{result["agent"]}</b>',
+                        unsafe_allow_html=True,
+                    )
+                    exec_cols[1].markdown(
+                        f'<div class="eyebrow">EXECUTION ID</div>'
+                        f'<span class="muted">{result["execution_id"] or "—"}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    exec_cols[2].markdown(
+                        f'<div class="eyebrow">STATUS</div>'
+                        f'<span class="good">{result["status"]}</span>',
+                        unsafe_allow_html=True,
+                    )
+                    exec_cols[3].markdown(
+                        f'<div class="eyebrow">STEPS</div><b>{result["steps"]}</b>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                    st.markdown('<div class="eyebrow">FINAL RESULT</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="card"><div class="page-title" style="font-size:20px">'
+                        f'{result["result"]}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    with st.expander("Execution trace"):
+                        render_execution_trace(result["events"])
 
 # ============================================================
 # CODE LAB
