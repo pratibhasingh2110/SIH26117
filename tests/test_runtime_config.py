@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from runtime.config import RuntimeConfig
@@ -310,3 +312,251 @@ def test_normal_execution_with_config_object(math_agent):
 
     assert state.status == "completed"
     assert state.result == "The answer is 30."
+
+
+# ------------------------------------------------------------------
+# 7. Timeout configuration
+# ------------------------------------------------------------------
+
+def test_default_config_timeout_none():
+    runtime = AgentRuntime()
+    assert runtime.config.timeout_seconds is None
+
+
+def test_config_timeout_seconds():
+    cfg = RuntimeConfig(timeout_seconds=5.0)
+    runtime = AgentRuntime(config=cfg)
+    assert runtime.config.timeout_seconds == 5.0
+
+
+# ------------------------------------------------------------------
+# 8. Timeout disabled (None)
+# ------------------------------------------------------------------
+
+def test_timeout_none_means_no_timeout():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=None)
+    agent = _make_agent(_AlwaysToolLLM())
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert state.status == "max_steps_exceeded"
+    events = runtime.recorder.get_events()
+    stopped = [e for e in events if e.type == "AgentStopped"]
+    assert stopped[0].data["reason"] == "max_steps_exceeded"
+
+
+# ------------------------------------------------------------------
+# 9. Normal execution before timeout
+# ------------------------------------------------------------------
+
+def test_normal_execution_before_timeout(math_agent):
+    cfg = RuntimeConfig(max_steps=10, timeout_seconds=10.0)
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent=math_agent, task="Calculate 10 + 20")
+
+    assert state.status == "completed"
+    assert state.result == "The answer is 30."
+
+
+# ------------------------------------------------------------------
+# 10. Timeout exceeded via SIGALRM (slow LLM)
+# ------------------------------------------------------------------
+
+class _SlowLLM(LLMProvider):
+    """LLM that sleeps before responding."""
+
+    def __init__(self, delay: float):
+        self.delay = delay
+
+    def generate(self, messages, tools=None):
+        time.sleep(self.delay)
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "Done."
+            }
+        }
+
+
+class _AlwaysSlowToolLLM(LLMProvider):
+    """LLM that requests a tool call and sleeps."""
+
+    def __init__(self, delay: float = 0.5):
+        self.delay = delay
+        self.calls = 0
+
+    def generate(self, messages, tools=None):
+        self.calls += 1
+        time.sleep(self.delay)
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "noop",
+                            "arguments": {}
+                        }
+                    }
+                ]
+            }
+        }
+
+
+class _SlowTool(Tool):
+    """Tool that sleeps before returning."""
+
+    name = "slow_tool"
+    description = "sleeps"
+    input_schema = {"type": "object"}
+
+    def __init__(self, delay: float):
+        self.delay = delay
+
+    def execute(self, arguments):
+        time.sleep(self.delay)
+        return "ok"
+
+
+class _SlowToolLLM(LLMProvider):
+    """LLM that calls a slow tool, then finishes."""
+
+    def __init__(self, tool_name: str = "slow_tool"):
+        self.tool_name = tool_name
+        self.calls = 0
+
+    def generate(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": self.tool_name,
+                                "arguments": {}
+                            }
+                        }
+                    ]
+                }
+            }
+        return {
+            "message": {
+                "role": "assistant",
+                "content": "Done."
+            }
+        }
+
+
+def test_timeout_exceeded_stops_execution():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert state.status == "timeout_exceeded"
+
+
+def test_timeout_exceeded_result_message():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert "timed out" in state.result
+    assert "0.1" in state.result
+
+
+def test_timeout_exceeded_event():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    events = runtime.recorder.get_events()
+    stopped = [e for e in events if e.type == "AgentStopped"]
+    assert len(stopped) == 1
+    assert stopped[0].data["reason"] == "timeout_exceeded"
+
+
+def test_timeout_event_elapsed_and_timeout():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.2)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    events = runtime.recorder.get_events()
+    stopped = [e for e in events if e.type == "AgentStopped"]
+    assert stopped[0].data["timeout"] == 0.2
+    assert isinstance(stopped[0].data["elapsed"], float)
+    assert stopped[0].data["elapsed"] >= 0.1
+
+
+def test_timeout_state_is_timeout_exceeded():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert state.status == "timeout_exceeded"
+    assert state.result is not None
+
+
+# ------------------------------------------------------------------
+# 11. Timeout combined with tool execution
+# ------------------------------------------------------------------
+
+def test_timeout_during_tool_execution():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    slow_tool = _SlowTool(delay=5.0)
+    agent = _make_agent(_SlowToolLLM("slow_tool"), tools=[slow_tool])
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert state.status == "timeout_exceeded"
+
+
+def test_timeout_cleanup_restores_signal():
+    import signal
+
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_SlowLLM(delay=5.0))
+    runtime = AgentRuntime(config=cfg)
+    runtime.run(agent, "go")
+
+    handler = signal.getsignal(signal.SIGALRM)
+    assert handler == signal.SIG_DFL
+
+
+# ------------------------------------------------------------------
+# 12. Existing max_steps + max_tool_calls unchanged
+# ------------------------------------------------------------------
+
+def test_max_steps_still_works_with_timeout_none():
+    agent = _make_agent(_AlwaysToolLLM())
+    runtime = AgentRuntime(max_steps=3)
+    state = runtime.run(agent, "go")
+
+    assert state.status == "max_steps_exceeded"
+    assert state.step == 4
+
+
+def test_max_tool_calls_still_works_with_timeout_none():
+    cfg = RuntimeConfig(max_steps=100, max_tool_calls=2)
+    runtime = AgentRuntime(config=cfg)
+    agent = _make_agent(_AlwaysToolLLM())
+    state = runtime.run(agent, "go")
+
+    assert state.status == "max_tool_calls_exceeded"
+
+
+def test_timeout_interacts_with_max_steps():
+    cfg = RuntimeConfig(max_steps=100, timeout_seconds=0.1)
+    agent = _make_agent(_AlwaysSlowToolLLM(delay=0.05))
+    runtime = AgentRuntime(config=cfg)
+    state = runtime.run(agent, "go")
+
+    assert state.status in ("timeout_exceeded", "max_steps_exceeded")
