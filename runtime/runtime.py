@@ -46,6 +46,7 @@ class AgentRuntime:
 
         self._tool_call_counter = 0
         self._tool_call_count = 0
+        self._llm_call_count = 0
         self._last_llm_error = None
 
     def _next_tool_call_id(self):
@@ -224,6 +225,26 @@ class AgentRuntime:
                     tool_registry
                 )
 
+                if (
+                    self.config.max_llm_calls is not None
+                    and self._llm_call_count >= self.config.max_llm_calls
+                ):
+
+                    state.status = "max_llm_calls_exceeded"
+                    state.result = (
+                        "Agent exceeded maximum LLM calls."
+                    )
+
+                    self.recorder.record(
+                        "AgentStopped",
+                        reason="max_llm_calls_exceeded",
+                        max_llm_calls=self.config.max_llm_calls,
+                        llm_call_count=self._llm_call_count,
+                        steps=state.step
+                    )
+
+                    return state
+
                 self.recorder.record(
                     "LLMCallStarted",
                     step=state.step
@@ -243,6 +264,8 @@ class AgentRuntime:
 
                 except _TimeoutExceeded:
                     raise
+
+                self._llm_call_count += 1
 
                 self.recorder.record(
                     "LLMCallCompleted",
