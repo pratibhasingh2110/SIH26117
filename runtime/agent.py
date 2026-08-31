@@ -11,5 +11,6 @@ class Agent:
     instructions: str
     llm: LLMProvider
     tools: list[Tool] = field(default_factory=list)
+    description: str = ""
 
     metadata: dict[str, Any] = field(default_factory=dict)
