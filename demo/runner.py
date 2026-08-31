@@ -174,6 +174,8 @@ def run_task(
     recorder: EventRecorder | None = None,
     config: RuntimeConfig | None = None,
     max_steps: int = 10,
+    model: str | None = None,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     """Callable entry point for the presentation layer.
 
@@ -184,5 +186,7 @@ def run_task(
         recorder=recorder,
         config=config,
         max_steps=max_steps,
+        model=model,
+        base_url=base_url,
     )
     return demo.run(task)

@@ -1,3 +1,5 @@
+import os
+
 import streamlit as st
 from datetime import datetime
 
@@ -761,6 +763,22 @@ elif selected_page == "Agent Orchestrator":
             "The rest of the workbench remains fully functional."
         )
     else:
+        _default_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:0.8b")
+
+        config_cols = st.columns(2)
+        with config_cols[0]:
+            base_url = st.text_input(
+                "Ollama base URL",
+                value="http://localhost:11434",
+                key="runtime_base_url",
+            )
+        with config_cols[1]:
+            model = st.text_input(
+                "Ollama model",
+                value=_default_model,
+                key="runtime_model",
+            )
+
         task_input = st.text_area(
             "Agent task",
             value="Use the calculator to calculate 25 + 17.",
@@ -781,7 +799,11 @@ elif selected_page == "Agent Orchestrator":
             else:
                 with st.spinner("Routing agent · executing …"):
                     try:
-                        result = run_task(task_input.strip())
+                        result = run_task(
+                            task_input.strip(),
+                            model=model,
+                            base_url=base_url,
+                        )
                     except DemoError as error:
                         st.error(str(error))
                         result = None

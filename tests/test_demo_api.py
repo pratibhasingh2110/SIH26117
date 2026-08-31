@@ -342,3 +342,48 @@ def test_run_task_entry_point():
 def test_run_task_empty_task_raises():
     with pytest.raises(ExecutionError):
         DemoRuntime(_make_agents(MathLLM())).run("   ")
+
+
+def test_run_task_forwards_model_and_base_url(monkeypatch):
+    captured = {}
+
+    class _FakeDemoRuntime:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, task):
+            return {"status": "completed"}
+
+    monkeypatch.setattr("demo.runner.DemoRuntime", _FakeDemoRuntime)
+
+    from demo.runner import run_task as _run_task
+
+    _run_task(
+        "some task",
+        model="qwen3.5:0.8b",
+        base_url="http://localhost:11434",
+    )
+
+    assert captured["model"] == "qwen3.5:0.8b"
+    assert captured["base_url"] == "http://localhost:11434"
+
+
+def test_demo_runtime_forwards_model_and_base_url_to_agents(monkeypatch):
+    captured = {}
+
+    class _FakeRouter:
+        def __init__(self, agents, recorder=None):
+            self.agents_received = agents
+
+    def _fake_build_agents(model, base_url):
+        captured["model"] = model
+        captured["base_url"] = base_url
+        return []
+
+    monkeypatch.setattr("demo.runner.build_agents", _fake_build_agents)
+    monkeypatch.setattr("demo.runner.AgentRouter", _FakeRouter)
+
+    DemoRuntime(model="qwen3.5:0.8b", base_url="http://localhost:11434")
+
+    assert captured["model"] == "qwen3.5:0.8b"
+    assert captured["base_url"] == "http://localhost:11434"
