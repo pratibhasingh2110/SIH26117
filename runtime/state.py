@@ -8,6 +8,8 @@ from runtime.messages import Message
 class AgentState:
     task: str
 
+    execution_id: str = ""
+
     messages: list[Message] = field(default_factory=list)
     actions: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)

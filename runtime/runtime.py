@@ -11,6 +11,7 @@ from runtime.parser import ResponseParser
 from runtime.state import AgentState
 from runtime.errors import ToolExecutionError
 from runtime.events import EventRecorder
+from runtime.cancellation import CancellationToken, new_token
 
 
 class _TimeoutExceeded(BaseException):
@@ -23,6 +24,9 @@ class _RetryExhausted(Exception):
 
 def _timeout_handler(signum, frame):
     raise _TimeoutExceeded()
+
+
+_CANCELLED = object()
 
 
 class AgentRuntime:
@@ -49,6 +53,48 @@ class AgentRuntime:
         self._llm_call_count = 0
         self._last_llm_error = None
 
+        self._execution_counter = 0
+        self._active_executions: dict[str, CancellationToken] = {}
+
+    def cancel(
+        self,
+        execution_id: str | None = None,
+    ) -> CancellationToken | None:
+        """Request cancellation of an active execution.
+
+        Args:
+            execution_id: The execution to cancel. If None, the most
+                recently created active execution is targeted.
+
+        Returns:
+            The CancellationToken if a matching active execution was
+            found (and cancellation was requested), otherwise None.
+        """
+        if not self._active_executions:
+            return None
+
+        if execution_id is not None:
+            token = self._active_executions.get(execution_id)
+        else:
+            target_id = max(self._active_executions.keys())
+            token = self._active_executions.get(target_id)
+
+        if token is None:
+            return None
+
+        token.request_cancellation()
+        return token
+
+    def _register_execution(self) -> tuple[str, CancellationToken]:
+        self._execution_counter += 1
+        execution_id = f"exec_{self._execution_counter}"
+        token = new_token(execution_id)
+        self._active_executions[execution_id] = token
+        return execution_id, token
+
+    def _unregister_execution(self, execution_id: str) -> None:
+        self._active_executions.pop(execution_id, None)
+
     def _next_tool_call_id(self):
         self._tool_call_counter += 1
         return f"tool_call_{self._tool_call_counter}"
@@ -59,8 +105,12 @@ class AgentRuntime:
             and getattr(error, "retryable", False)
         )
 
-    def _generate_with_retry(self, agent, context, tool_registry, state):
+    def _generate_with_retry(self, agent, context, tool_registry, state, token):
         for attempt in range(self.config.max_retries + 1):
+            if self._is_cancelled(token):
+                self._handle_cancellation(state, token)
+                return None
+
             if attempt > 0:
                 self.recorder.record(
                     "LLMRetry",
@@ -68,6 +118,7 @@ class AgentRuntime:
                     max_retries=self.config.max_retries,
                     error=self._last_llm_error,
                     step=state.step,
+                    execution_id=state.execution_id,
                 )
 
             try:
@@ -85,6 +136,7 @@ class AgentRuntime:
                         "LLMCallFailed",
                         step=state.step,
                         error=str(error),
+                        execution_id=state.execution_id,
                     )
                     raise _RetryExhausted() from error
 
@@ -100,13 +152,18 @@ class AgentRuntime:
                     error=str(error),
                     attempt=attempt + 1,
                     max_retries=self.config.max_retries,
+                    execution_id=state.execution_id,
                 )
                 raise _RetryExhausted() from error
 
         raise _RetryExhausted()
 
-    def _execute_tool_with_retry(self, executor, tool_call, state):
+    def _execute_tool_with_retry(self, executor, tool_call, state, token):
         for attempt in range(self.config.max_retries + 1):
+            if self._is_cancelled(token):
+                self._handle_cancellation(state, token)
+                return _CANCELLED
+
             try:
                 return executor.execute(tool_call)
             except _TimeoutExceeded:
@@ -123,6 +180,7 @@ class AgentRuntime:
                         error=str(error),
                         tool=tool_call.tool_name,
                         step=state.step,
+                        execution_id=state.execution_id,
                     )
                     continue
 
@@ -133,10 +191,33 @@ class AgentRuntime:
                     error=str(error),
                     tool=tool_call.tool_name,
                     step=state.step,
+                    execution_id=state.execution_id,
                 )
                 raise
 
         raise ToolExecutionError("Tool execution retries exhausted.")
+
+    def _is_cancelled(self, token: CancellationToken) -> bool:
+        return token is not None and token.is_cancelled
+
+    def _handle_cancellation(self, state: AgentState, token: CancellationToken):
+        state.status = "cancelled"
+        state.result = "Agent execution was cancelled."
+        self.recorder.record(
+            "CancellationRequested",
+            execution_id=state.execution_id,
+            step=state.step,
+            llm_call_count=self._llm_call_count,
+            tool_call_count=self._tool_call_count,
+        )
+        self.recorder.record(
+            "AgentStopped",
+            reason="cancelled",
+            steps=state.step,
+            execution_id=state.execution_id,
+            llm_call_count=self._llm_call_count,
+            tool_call_count=self._tool_call_count,
+        )
 
     def run(
         self,
@@ -144,7 +225,9 @@ class AgentRuntime:
         task: str
     ) -> AgentState:
 
-        state = AgentState(task=task)
+        execution_id, token = self._register_execution()
+
+        state = AgentState(task=task, execution_id=execution_id)
         start_time = time.monotonic()
 
         tool_registry = self._build_tool_registry(agent)
@@ -154,7 +237,8 @@ class AgentRuntime:
         self.recorder.record(
             "AgentStarted",
             agent=agent.name,
-            task=task
+            task=task,
+            execution_id=execution_id
         )
 
         state.messages.append(Message(
@@ -177,11 +261,16 @@ class AgentRuntime:
 
             while state.status == "running":
 
+                if self._is_cancelled(token):
+                    self._handle_cancellation(state, token)
+                    return state
+
                 state.step += 1
 
                 self.recorder.record(
                     "StepStarted",
-                    step=state.step
+                    step=state.step,
+                    execution_id=execution_id
                 )
 
                 if state.step > self.config.max_steps:
@@ -194,7 +283,8 @@ class AgentRuntime:
                     self.recorder.record(
                         "AgentStopped",
                         reason="max_steps_exceeded",
-                        steps=state.step
+                        steps=state.step,
+                        execution_id=execution_id
                     )
 
                     return state
@@ -215,10 +305,15 @@ class AgentRuntime:
                             reason="timeout_exceeded",
                             elapsed=elapsed,
                             timeout=self.config.timeout_seconds,
-                            steps=state.step
+                            steps=state.step,
+                            execution_id=execution_id
                         )
 
                         return state
+
+                if self._is_cancelled(token):
+                    self._handle_cancellation(state, token)
+                    return state
 
                 context = self.context_builder.build(
                     state,
@@ -240,14 +335,16 @@ class AgentRuntime:
                         reason="max_llm_calls_exceeded",
                         max_llm_calls=self.config.max_llm_calls,
                         llm_call_count=self._llm_call_count,
-                        steps=state.step
+                        steps=state.step,
+                        execution_id=execution_id
                     )
 
                     return state
 
                 self.recorder.record(
                     "LLMCallStarted",
-                    step=state.step
+                    step=state.step,
+                    execution_id=execution_id
                 )
 
                 try:
@@ -256,7 +353,8 @@ class AgentRuntime:
                         agent,
                         context,
                         tool_registry,
-                        state
+                        state,
+                        token
                     )
 
                 except _RetryExhausted:
@@ -265,12 +363,20 @@ class AgentRuntime:
                 except _TimeoutExceeded:
                     raise
 
+                if response is None:
+                    return state
+
                 self._llm_call_count += 1
 
                 self.recorder.record(
                     "LLMCallCompleted",
-                    step=state.step
+                    step=state.step,
+                    execution_id=execution_id
                 )
+
+                if self._is_cancelled(token):
+                    self._handle_cancellation(state, token)
+                    return state
 
                 action = self.parser.parse(response)
 
@@ -282,7 +388,8 @@ class AgentRuntime:
                     self.recorder.record(
                         "AgentCompleted",
                         result=action.content,
-                        steps=state.step
+                        steps=state.step,
+                        execution_id=execution_id
                     )
 
                     return state
@@ -314,6 +421,10 @@ class AgentRuntime:
 
                     for tool_call in action:
 
+                        if self._is_cancelled(token):
+                            self._handle_cancellation(state, token)
+                            return state
+
                         if (
                             self.config.max_tool_calls is not None
                             and self._tool_call_count >= self.config.max_tool_calls
@@ -328,7 +439,8 @@ class AgentRuntime:
                                 "AgentStopped",
                                 reason="max_tool_calls_exceeded",
                                 tool_calls=self._tool_call_count,
-                                steps=state.step
+                                steps=state.step,
+                                execution_id=execution_id
                             )
 
                             return state
@@ -343,7 +455,8 @@ class AgentRuntime:
                             "ToolCall",
                             tool=tool_call.tool_name,
                             arguments=tool_call.arguments,
-                            tool_call_id=tool_call.tool_call_id
+                            tool_call_id=tool_call.tool_call_id,
+                            execution_id=execution_id
                         )
 
                         try:
@@ -351,7 +464,8 @@ class AgentRuntime:
                             result = self._execute_tool_with_retry(
                                 executor,
                                 tool_call,
-                                state
+                                state,
+                                token
                             )
 
                         except ToolExecutionError as error:
@@ -368,7 +482,8 @@ class AgentRuntime:
                                 "ToolExecutionFailed",
                                 tool=tool_call.tool_name,
                                 error=str(error),
-                                tool_call_id=tool_call.tool_call_id
+                                tool_call_id=tool_call.tool_call_id,
+                                execution_id=execution_id
                             )
 
                             state.messages.append(Message(
@@ -379,6 +494,9 @@ class AgentRuntime:
                             ))
 
                             continue
+
+                        if result is _CANCELLED:
+                            return state
 
                         self._tool_call_count += 1
 
@@ -392,7 +510,8 @@ class AgentRuntime:
                             "ToolResult",
                             tool=tool_call.tool_name,
                             result=result,
-                            tool_call_id=tool_call.tool_call_id
+                            tool_call_id=tool_call.tool_call_id,
+                            execution_id=execution_id
                         )
 
                         state.messages.append(Message(
@@ -415,7 +534,8 @@ class AgentRuntime:
                 reason="timeout_exceeded",
                 elapsed=elapsed,
                 timeout=self.config.timeout_seconds,
-                steps=state.step
+                steps=state.step,
+                execution_id=execution_id
             )
             return state
 
@@ -423,6 +543,7 @@ class AgentRuntime:
             if self.config.timeout_seconds is not None:
                 signal.setitimer(signal.ITIMER_REAL, 0)
                 signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            self._unregister_execution(execution_id)
 
         return state
 
