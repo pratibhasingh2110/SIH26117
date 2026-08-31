@@ -17,6 +17,10 @@ class _TimeoutExceeded(BaseException):
     """Raised internally when the execution timeout is exceeded."""
 
 
+class _RetryExhausted(Exception):
+    """Raised internally when retries are exhausted and execution must stop."""
+
+
 def _timeout_handler(signum, frame):
     raise _TimeoutExceeded()
 
@@ -42,10 +46,96 @@ class AgentRuntime:
 
         self._tool_call_counter = 0
         self._tool_call_count = 0
+        self._last_llm_error = None
 
     def _next_tool_call_id(self):
         self._tool_call_counter += 1
         return f"tool_call_{self._tool_call_counter}"
+
+    def _is_retryable(self, error) -> bool:
+        return (
+            self.config.max_retries > 0
+            and getattr(error, "retryable", False)
+        )
+
+    def _generate_with_retry(self, agent, context, tool_registry, state):
+        for attempt in range(self.config.max_retries + 1):
+            if attempt > 0:
+                self.recorder.record(
+                    "LLMRetry",
+                    attempt=attempt,
+                    max_retries=self.config.max_retries,
+                    error=self._last_llm_error,
+                    step=state.step,
+                )
+
+            try:
+                return agent.llm.generate(
+                    context,
+                    tools=tool_registry.list_tools()
+                )
+            except _TimeoutExceeded:
+                raise
+            except Exception as error:
+                if not self._is_retryable(error):
+                    state.status = "failed"
+                    state.result = str(error)
+                    self.recorder.record(
+                        "LLMCallFailed",
+                        step=state.step,
+                        error=str(error),
+                    )
+                    raise _RetryExhausted() from error
+
+                if attempt < self.config.max_retries:
+                    self._last_llm_error = str(error)
+                    continue
+
+                state.status = "failed"
+                state.result = str(error)
+                self.recorder.record(
+                    "LLMRetryFailed",
+                    step=state.step,
+                    error=str(error),
+                    attempt=attempt + 1,
+                    max_retries=self.config.max_retries,
+                )
+                raise _RetryExhausted() from error
+
+        raise _RetryExhausted()
+
+    def _execute_tool_with_retry(self, executor, tool_call, state):
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                return executor.execute(tool_call)
+            except _TimeoutExceeded:
+                raise
+            except ToolExecutionError as error:
+                if not self._is_retryable(error):
+                    raise
+
+                if attempt < self.config.max_retries:
+                    self.recorder.record(
+                        "ToolRetry",
+                        attempt=attempt + 1,
+                        max_retries=self.config.max_retries,
+                        error=str(error),
+                        tool=tool_call.tool_name,
+                        step=state.step,
+                    )
+                    continue
+
+                self.recorder.record(
+                    "ToolRetryFailed",
+                    attempt=attempt + 1,
+                    max_retries=self.config.max_retries,
+                    error=str(error),
+                    tool=tool_call.tool_name,
+                    step=state.step,
+                )
+                raise
+
+        raise ToolExecutionError("Tool execution retries exhausted.")
 
     def run(
         self,
@@ -141,23 +231,18 @@ class AgentRuntime:
 
                 try:
 
-                    response = agent.llm.generate(
+                    response = self._generate_with_retry(
+                        agent,
                         context,
-                        tools=tool_registry.list_tools()
+                        tool_registry,
+                        state
                     )
 
-                except Exception as error:
-
-                    state.status = "failed"
-                    state.result = str(error)
-
-                    self.recorder.record(
-                        "LLMCallFailed",
-                        step=state.step,
-                        error=str(error)
-                    )
-
+                except _RetryExhausted:
                     return state
+
+                except _TimeoutExceeded:
+                    raise
 
                 self.recorder.record(
                     "LLMCallCompleted",
@@ -240,7 +325,11 @@ class AgentRuntime:
 
                         try:
 
-                            result = executor.execute(tool_call)
+                            result = self._execute_tool_with_retry(
+                                executor,
+                                tool_call,
+                                state
+                            )
 
                         except ToolExecutionError as error:
 

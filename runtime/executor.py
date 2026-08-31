@@ -22,6 +22,9 @@ class ToolExecutor:
             )
 
         except Exception as error:
-            raise ToolExecutionError(
+            wrapped = ToolExecutionError(
                 f"Tool '{tool_call.tool_name}' failed: {error}"
-            ) from error
+            )
+            if getattr(error, "retryable", False):
+                wrapped.retryable = True
+            raise wrapped from error
