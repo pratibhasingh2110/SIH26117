@@ -2,6 +2,7 @@ from runtime.actions import ToolCall, FinalAnswer
 from runtime.agent import Agent
 from runtime.context import ContextBuilder
 from runtime.executor import ToolExecutor
+from runtime.messages import Message
 from runtime.parser import ResponseParser
 from runtime.state import AgentState
 from runtime.errors import ToolExecutionError
@@ -21,6 +22,12 @@ class AgentRuntime:
         self.context_builder = ContextBuilder()
         self.parser = ResponseParser()
 
+        self._tool_call_counter = 0
+
+    def _next_tool_call_id(self):
+        self._tool_call_counter += 1
+        return f"tool_call_{self._tool_call_counter}"
+
     def run(
         self,
         agent: Agent,
@@ -39,15 +46,15 @@ class AgentRuntime:
             task=task
         )
 
-        state.messages.append({
-            "role": "system",
-            "content": agent.instructions
-        })
+        state.messages.append(Message(
+            role="system",
+            content=agent.instructions
+        ))
 
-        state.messages.append({
-            "role": "user",
-            "content": task
-        })
+        state.messages.append(Message(
+            role="user",
+            content=task
+        ))
 
         while state.status == "running":
 
@@ -123,64 +130,93 @@ class AgentRuntime:
 
                 return state
 
-            if isinstance(action, ToolCall):
+            if isinstance(action, list):
 
-                state.actions.append({
-                    "tool": action.tool_name,
-                    "arguments": action.arguments
-                })
+                for tool_call in action:
+                    if tool_call.tool_call_id is None:
+                        tool_call.tool_call_id = self._next_tool_call_id()
 
-                self.recorder.record(
-                    "ToolCall",
-                    tool=action.tool_name,
-                    arguments=action.arguments
-                )
+                raw = action[0].raw_message
 
-                state.messages.append(
-                    action.raw_message
-                )
+                assistant_tool_calls = []
+                for tool_call in action:
+                    entry = {
+                        "id": tool_call.tool_call_id,
+                        "function": {
+                            "name": tool_call.tool_name,
+                            "arguments": tool_call.arguments
+                        }
+                    }
+                    assistant_tool_calls.append(entry)
 
-                try:
+                state.messages.append(Message(
+                    role=raw.get("role", "assistant"),
+                    content=raw.get("content"),
+                    tool_calls=assistant_tool_calls,
+                ))
 
-                    result = executor.execute(action)
+                for tool_call in action:
 
-                except ToolExecutionError as error:
-
-                    state.observations.append({
-                        "tool": action.tool_name,
-                        "error": str(error)
+                    state.actions.append({
+                        "tool": tool_call.tool_name,
+                        "arguments": tool_call.arguments,
+                        "tool_call_id": tool_call.tool_call_id
                     })
 
                     self.recorder.record(
-                        "ToolExecutionFailed",
-                        tool=action.tool_name,
-                        error=str(error)
+                        "ToolCall",
+                        tool=tool_call.tool_name,
+                        arguments=tool_call.arguments,
+                        tool_call_id=tool_call.tool_call_id
                     )
 
-                    state.messages.append({
-                        "role": "tool",
-                        "content": f"Tool execution failed: {error}",
-                        "name": action.tool_name
+                    try:
+
+                        result = executor.execute(tool_call)
+
+                    except ToolExecutionError as error:
+
+                        state.observations.append({
+                            "tool": tool_call.tool_name,
+                            "error": str(error),
+                            "tool_call_id": tool_call.tool_call_id
+                        })
+
+                        self.recorder.record(
+                            "ToolExecutionFailed",
+                            tool=tool_call.tool_name,
+                            error=str(error),
+                            tool_call_id=tool_call.tool_call_id
+                        )
+
+                        state.messages.append(Message(
+                            role="tool",
+                            content=f"Tool execution failed: {error}",
+                            name=tool_call.tool_name,
+                            tool_call_id=tool_call.tool_call_id
+                        ))
+
+                        continue
+
+                    state.observations.append({
+                        "tool": tool_call.tool_name,
+                        "result": result,
+                        "tool_call_id": tool_call.tool_call_id
                     })
 
-                    continue
+                    self.recorder.record(
+                        "ToolResult",
+                        tool=tool_call.tool_name,
+                        result=result,
+                        tool_call_id=tool_call.tool_call_id
+                    )
 
-                state.observations.append({
-                    "tool": action.tool_name,
-                    "result": result
-                })
-
-                self.recorder.record(
-                    "ToolResult",
-                    tool=action.tool_name,
-                    result=result
-                )
-
-                state.messages.append({
-                    "role": "tool",
-                    "content": str(result),
-                    "name": action.tool_name
-                })
+                    state.messages.append(Message(
+                        role="tool",
+                        content=str(result),
+                        name=tool_call.tool_name,
+                        tool_call_id=tool_call.tool_call_id
+                    ))
 
         return state
 

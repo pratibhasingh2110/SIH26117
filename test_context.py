@@ -1,6 +1,7 @@
 from runtime.state import AgentState
 from runtime.tools import Tool, ToolRegistry
 from runtime.context import ContextBuilder
+from runtime.messages import Message
 
 
 class Calculator(Tool):
@@ -25,10 +26,15 @@ state = AgentState(
     task="Calculate 10 + 20"
 )
 
-state.messages.append({
-    "role": "user",
-    "content": state.task
-})
+state.messages.append(Message(
+    role="system",
+    content="You are a math assistant."
+))
+
+state.messages.append(Message(
+    role="user",
+    content=state.task
+))
 
 registry = ToolRegistry()
 registry.register(Calculator())

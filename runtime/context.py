@@ -12,11 +12,6 @@ class ContextBuilder:
 
         messages = []
 
-        messages.append({
-            "role": "system",
-            "content": "You are an AI agent. Use tools when necessary."
-        })
-
         for message in state.messages:
 
             data = {

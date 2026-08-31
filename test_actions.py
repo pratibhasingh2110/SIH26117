@@ -6,6 +6,18 @@ tool_call = ToolCall(
     arguments={
         "a": 10,
         "b": 20
+    },
+    raw_message={
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "function": {
+                    "name": "calculator",
+                    "arguments": {"a": 10, "b": 20}
+                }
+            }
+        ]
     }
 )
 

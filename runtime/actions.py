@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -7,6 +7,7 @@ class ToolCall:
     tool_name: str
     arguments: dict[str, Any]
     raw_message: dict[str, Any]
+    tool_call_id: str | None = None
 
 
 @dataclass

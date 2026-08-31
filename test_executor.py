@@ -31,7 +31,8 @@ call = ToolCall(
     arguments={
         "a": 10,
         "b": 20
-    }
+    },
+    raw_message={}
 )
 
 result = executor.execute(call)

@@ -1,8 +1,8 @@
-from runtime.actions import ToolCall, FinalAnswer
-from runtime.runtime import AgentRuntime
-from runtime.tools import Tool, ToolRegistry
-from runtime.llm import LLMProvider
+import pytest
+
 from runtime.agent import Agent
+from runtime.tools import Tool
+from runtime.llm import LLMProvider
 
 
 class Calculator(Tool):
@@ -23,7 +23,22 @@ class Calculator(Tool):
         return arguments["a"] + arguments["b"]
 
 
-class FakeLLM(LLMProvider):
+@pytest.fixture
+def calculator_tool():
+    return Calculator()
+
+
+@pytest.fixture
+def math_agent(calculator_tool):
+    return Agent(
+        name="MathAgent",
+        instructions="You are a math assistant.",
+        llm=_FakeMathLLM(),
+        tools=[calculator_tool]
+    )
+
+
+class _FakeMathLLM(LLMProvider):
 
     def __init__(self):
         self.called = False
@@ -54,23 +69,3 @@ class FakeLLM(LLMProvider):
                 "content": "The answer is 30."
             }
         }
-
-
-agent = Agent(
-    name="MathAgent",
-    instructions="You are a math assistant.",
-    llm=FakeLLM(),
-    tools=[Calculator()]
-)
-
-runtime = AgentRuntime(max_steps=10)
-
-state = runtime.run(
-    agent=agent,
-    task="Calculate 10 + 20"
-)
-
-print("Status:", state.status)
-print("Steps:", state.step)
-print("Observations:", state.observations)
-print("Result:", state.result)
