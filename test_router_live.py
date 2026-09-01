@@ -2,24 +2,8 @@ import runtime
 from providers.ollama import OllamaProvider
 from runtime.agent import Agent
 from runtime.runtime import AgentRuntime
-from runtime.tools import Tool
 from router import AgentRouter
-
-
-class Calculator(Tool):
-    name = "calculator"
-    description = "Adds two numbers"
-    input_schema = {
-        "type": "object",
-        "properties": {
-            "a": {"type": "number"},
-            "b": {"type": "number"},
-        },
-        "required": ["a", "b"],
-    }
-
-    def execute(self, arguments):
-        return arguments["a"] + arguments["b"]
+from agents.registry import Calculator
 
 
 math_agent = Agent(

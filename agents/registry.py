@@ -4,14 +4,37 @@ from runtime.tools import ToolRegistry
 from providers.ollama import OllamaProvider
 
 _CALCULATOR_NAME = "calculator"
-_CALCULATOR_DESCRIPTION = "Adds two numbers"
+_CALCULATOR_DESCRIPTION = (
+    "Performs arithmetic operations on two numbers. "
+    "Supported operations: add (+), subtract (-), multiply (*), divide (/). "
+    "When 'operation' is omitted, defaults to addition."
+)
 _CALCULATOR_SCHEMA = {
     "type": "object",
     "properties": {
         "a": {"type": "number"},
         "b": {"type": "number"},
+        "operation": {
+            "type": "string",
+            "enum": ["add", "+", "subtract", "-", "multiply", "*", "divide", "/"],
+            "description": (
+                "The arithmetic operation to perform. "
+                "Defaults to 'add' when omitted."
+            ),
+        },
     },
     "required": ["a", "b"],
+}
+
+_CALCULATOR_OPERATIONS = {
+    "add": lambda a, b: a + b,
+    "+": lambda a, b: a + b,
+    "subtract": lambda a, b: a - b,
+    "-": lambda a, b: a - b,
+    "multiply": lambda a, b: a * b,
+    "*": lambda a, b: a * b,
+    "divide": lambda a, b: a / b,
+    "/": lambda a, b: a / b,
 }
 
 
@@ -21,7 +44,21 @@ class Calculator(Tool):
     input_schema = _CALCULATOR_SCHEMA
 
     def execute(self, arguments):
-        return arguments["a"] + arguments["b"]
+        a = arguments["a"]
+        b = arguments["b"]
+        operation = arguments.get("operation") or "add"
+        key = operation.lower() if isinstance(operation, str) else ""
+
+        if key not in _CALCULATOR_OPERATIONS:
+            raise ValueError(
+                f"Unsupported operation: {operation!r}. "
+                "Supported operations: add, subtract, multiply, divide."
+            )
+
+        if key in ("divide", "/") and b == 0:
+            raise ValueError("Division by zero is not allowed.")
+
+        return _CALCULATOR_OPERATIONS[key](a, b)
 
 
 _DEFAULT_MODEL = "qwen2.5:7b"
